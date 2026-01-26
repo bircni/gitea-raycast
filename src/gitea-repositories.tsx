@@ -23,6 +23,26 @@ import {
   type GiteaRepo,
 } from "./lib/gitea";
 
+interface GiteaAuthenticatedUser {
+  id: number;
+  login: string;
+}
+
+async function fetchCurrentUser(baseUrl: string, accessToken: string): Promise<GiteaAuthenticatedUser | null> {
+  try {
+    const response = await fetch(`${normalizeBaseUrl(baseUrl)}/api/v1/user`, {
+      headers: { Authorization: `token ${accessToken}` },
+    });
+    if (!response.ok) {
+      return null;
+    }
+    const data = (await response.json()) as GiteaAuthenticatedUser;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
 interface Preferences {
   baseUrl: string;
   accessToken?: string;
@@ -216,11 +236,23 @@ function IssuesList({ baseUrl, repo, accessToken }: { baseUrl: string; repo: Git
   );
 }
 
+type PRFilter = "none" | "assigned" | "created" | "review_requested";
+
 function PullRequestsList({ baseUrl, repo, accessToken }: { baseUrl: string; repo: GiteaRepo; accessToken?: string }) {
   const [pulls, setPulls] = useState<GiteaPullRequest[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [statusById, setStatusById] = useState<Record<number, string>>({});
+  const [filter, setFilter] = useState<PRFilter>("none");
+  const [currentUser, setCurrentUser] = useState<GiteaAuthenticatedUser | null>(null);
+
+  // Fetch current user on mount when authenticated
+  useEffect(() => {
+    if (!accessToken) {
+      return;
+    }
+    fetchCurrentUser(baseUrl, accessToken).then(setCurrentUser);
+  }, [accessToken, baseUrl]);
 
   useEffect(() => {
     const [owner, name] = repo.full_name.split("/");
@@ -230,7 +262,13 @@ function PullRequestsList({ baseUrl, repo, accessToken }: { baseUrl: string; rep
       return;
     }
 
-    const url = `${normalizeBaseUrl(baseUrl)}/api/v1/repos/${owner}/${name}/pulls?state=open`;
+    // Build URL with server-side filtering for "created by me"
+    let url = `${normalizeBaseUrl(baseUrl)}/api/v1/repos/${owner}/${name}/pulls?state=open`;
+    if (filter === "created" && currentUser) {
+      url += `&poster=${currentUser.login}`;
+    }
+
+    setIsLoading(true);
     fetchPaged<GiteaPullRequest>(url, accessToken)
       .then((data) => setPulls(data))
       .catch((error) => {
@@ -238,7 +276,7 @@ function PullRequestsList({ baseUrl, repo, accessToken }: { baseUrl: string; rep
         setErrorMessage(message);
       })
       .finally(() => setIsLoading(false));
-  }, [accessToken, baseUrl, repo.full_name]);
+  }, [accessToken, baseUrl, repo.full_name, filter, currentUser]);
 
   useEffect(() => {
     const [owner, name] = repo.full_name.split("/");
@@ -277,24 +315,94 @@ function PullRequestsList({ baseUrl, repo, accessToken }: { baseUrl: string; rep
     };
   }, [accessToken, baseUrl, pulls, repo.full_name]);
 
+  // Client-side filtering for "assigned to me" and "review requested"
+  const filteredPulls = useMemo(() => {
+    if (!currentUser) return pulls;
+    if (filter === "assigned") {
+      return pulls.filter(
+        (pr) => pr.assignee?.login === currentUser.login || pr.assignees?.some((a) => a.login === currentUser.login),
+      );
+    }
+    if (filter === "review_requested") {
+      return pulls.filter((pr) =>
+        pr.requested_reviewers?.some((reviewer) => reviewer.login === currentUser.login),
+      );
+    }
+    return pulls;
+  }, [pulls, filter, currentUser]);
+
+  const filterLabel =
+    filter === "assigned"
+      ? " (Assigned to Me)"
+      : filter === "created"
+        ? " (Created by Me)"
+        : filter === "review_requested"
+          ? " (Review Requested)"
+          : "";
+
   return (
-    <List isLoading={isLoading} searchBarPlaceholder={`Open pull requests in ${repo.full_name}`}>
+    <List isLoading={isLoading} searchBarPlaceholder={`Open pull requests in ${repo.full_name}${filterLabel}`}>
       {errorMessage ? (
         <List.EmptyView icon={Icon.ExclamationMark} title="Could not load pull requests" description={errorMessage} />
       ) : null}
-      {pulls.map((pull) => {
+      {filteredPulls.length === 0 && !isLoading && !errorMessage ? (
+        <List.EmptyView
+          icon={Icon.MagnifyingGlass}
+          title={filter !== "none" ? "No matching pull requests" : "No open pull requests"}
+          description={filter !== "none" ? "Try clearing the filter to see all pull requests" : undefined}
+        />
+      ) : null}
+      {filteredPulls.map((pull) => {
         const status = pull.draft ? "Draft" : pull.state;
         const checks = formatStatus(statusById[pull.id]);
         return (
           <List.Item
             key={pull.id}
             title={`#${pull.number} ${pull.title}`}
-            subtitle={`${pull.user.login} • Updated ${formatUpdatedAt(pull.updated_at)}${status ? ` • ${status}` : ""} • ${checks}`}
+            subtitle={`${status ? `${status} • ` : ""}${checks}`}
             icon={Icon.ArrowRightCircle}
+            accessories={
+              filter !== "none"
+                ? [
+                    {
+                      tag:
+                        filter === "assigned"
+                          ? "Assigned"
+                          : filter === "created"
+                            ? "Created"
+                            : filter === "review_requested"
+                              ? "Review Requested"
+                              : "",
+                    },
+                  ]
+                : undefined
+            }
             actions={
               <ActionPanel>
                 <Action.OpenInBrowser title="Open Pull Request" url={pull.html_url} />
                 <Action.CopyToClipboard title="Copy Pull Request URL" content={pull.html_url} />
+                {accessToken && currentUser && (
+                  <ActionPanel.Section title="Filters">
+                    <Action
+                      title={filter === "assigned" ? "Clear 'Assigned to Me' Filter" : "Show Assigned to Me"}
+                      icon={filter === "assigned" ? Icon.XMarkCircle : Icon.Person}
+                      shortcut={{ modifiers: ["cmd", "shift"], key: "a" }}
+                      onAction={() => setFilter(filter === "assigned" ? "none" : "assigned")}
+                    />
+                    <Action
+                      title={filter === "created" ? "Clear 'Created by Me' Filter" : "Show Created by Me"}
+                      icon={filter === "created" ? Icon.XMarkCircle : Icon.Pencil}
+                      shortcut={{ modifiers: ["cmd", "shift"], key: "c" }}
+                      onAction={() => setFilter(filter === "created" ? "none" : "created")}
+                    />
+                    <Action
+                      title={filter === "review_requested" ? "Clear 'Review Requested' Filter" : "Show Review Requested"}
+                      icon={filter === "review_requested" ? Icon.XMarkCircle : Icon.Eye}
+                      shortcut={{ modifiers: ["cmd", "shift"], key: "r" }}
+                      onAction={() => setFilter(filter === "review_requested" ? "none" : "review_requested")}
+                    />
+                  </ActionPanel.Section>
+                )}
               </ActionPanel>
             }
           />
@@ -391,18 +499,18 @@ async function fetchAllRepos(baseUrl: string, accessToken?: string) {
     if (data.length === 0) {
       break;
     }
-    
+
     // Stop if we got all repos according to total_count
     if (typeof totalCount === "number" && repos.length >= totalCount) {
       break;
     }
-    
+
     // Stop if no new repos were added (we've seen all of them)
     if (repos.length === prevCount) {
       break;
     }
     prevCount = repos.length;
-    
+
     page += 1;
   }
 
@@ -423,7 +531,7 @@ async function fetchAllRepos(baseUrl: string, accessToken?: string) {
       }
 
       const data = (await response.json()) as GiteaRepo[];
-      
+
       if (!Array.isArray(data) || data.length === 0) {
         break;
       }
@@ -448,31 +556,30 @@ async function fetchAllRepos(baseUrl: string, accessToken?: string) {
     try {
       let orgPage = 1;
       const allOrgs: Array<{ username?: string; name?: string }> = [];
-      
+
       while (true) {
-        const orgsResponse = await fetch(
-          `${normalizeBaseUrl(baseUrl)}/api/v1/orgs?limit=${PER_PAGE}&page=${orgPage}`,
-          { headers: { Authorization: `token ${accessToken}` } }
-        );
+        const orgsResponse = await fetch(`${normalizeBaseUrl(baseUrl)}/api/v1/orgs?limit=${PER_PAGE}&page=${orgPage}`, {
+          headers: { Authorization: `token ${accessToken}` },
+        });
 
         if (!orgsResponse.ok) {
           break;
         }
 
         const orgs = (await orgsResponse.json()) as Array<{ username?: string; name?: string }>;
-        
+
         if (!Array.isArray(orgs) || orgs.length === 0) {
           break;
         }
-        
+
         allOrgs.push(...orgs);
-        
+
         if (orgs.length < PER_PAGE) {
           break;
         }
         orgPage += 1;
       }
-      
+
       for (const org of allOrgs) {
         const orgName = org.username || org.name;
         if (!orgName) continue;
@@ -779,7 +886,11 @@ export default function Command() {
                       </>
                     )}
                     <Action.CopyToClipboard title="Copy Repository URL" content={repoUrl} />
-                    <Action title="Refresh Repositories" icon={Icon.ArrowClockwise} onAction={() => refreshRepos(true)} />
+                    <Action
+                      title="Refresh Repositories"
+                      icon={Icon.ArrowClockwise}
+                      onAction={() => refreshRepos(true)}
+                    />
                     <Action title="Clear Cache" icon={Icon.Trash} onAction={handleClearCache} />
                     <Action title="Reset Usage Stats" icon={Icon.ArrowCounterClockwise} onAction={handleResetUsage} />
                     <Action.Push title="How to Open Preferences" icon={Icon.Gear} target={<PreferencesHelp />} />
