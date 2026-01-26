@@ -29,6 +29,9 @@ export interface GiteaPullRequest extends GiteaIssue {
   head?: {
     sha: string;
   };
+  assignee?: GiteaUser | null;
+  assignees?: GiteaUser[];
+  requested_reviewers?: GiteaUser[];
 }
 
 export interface GiteaRelease {
