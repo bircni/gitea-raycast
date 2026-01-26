@@ -355,18 +355,17 @@ function ReleasesList({ baseUrl, repo, accessToken }: { baseUrl: string; repo: G
 }
 
 async function fetchAllRepos(baseUrl: string, accessToken?: string) {
-  const apiUrl = `${normalizeBaseUrl(baseUrl)}/api/v1/repos/search`;
   const repos: GiteaRepo[] = [];
-  let page = 1;
-  let totalCount = 0;
+  const seenIds = new Set<number>();
 
+  // Always fetch all accessible repos via search endpoint
+  // This includes public repos and repos the user has access to
+  let page = 1;
+  let prevCount = 0;
   while (true) {
-    const url = new URL(apiUrl);
+    const url = new URL(`${normalizeBaseUrl(baseUrl)}/api/v1/repos/search`);
     url.searchParams.set("limit", String(PER_PAGE));
     url.searchParams.set("page", String(page));
-    if (accessToken) {
-      url.searchParams.set("token", accessToken);
-    }
 
     const response = await fetch(url.toString(), {
       headers: accessToken ? { Authorization: `token ${accessToken}` } : undefined,
@@ -377,30 +376,145 @@ async function fetchAllRepos(baseUrl: string, accessToken?: string) {
       throw new Error(`Gitea API error (${response.status}): ${message || response.statusText}`);
     }
 
-    const payload = (await response.json()) as { data?: GiteaRepo[]; total_count?: number | string };
-    const data = Array.isArray(payload.data) ? payload.data : [];
-    repos.push(...data);
+    const json = (await response.json()) as { data?: GiteaRepo[]; total_count?: number };
+    const data: GiteaRepo[] = Array.isArray(json.data) ? json.data : [];
+    const totalCount = json.total_count;
 
-    if (payload.total_count !== undefined) {
-      const parsed = typeof payload.total_count === "string" ? Number(payload.total_count) : payload.total_count;
-      if (!Number.isNaN(parsed)) {
-        totalCount = parsed;
+    for (const repo of data) {
+      if (!seenIds.has(repo.id)) {
+        seenIds.add(repo.id);
+        repos.push(repo);
       }
     }
 
+    // Stop if no data returned
     if (data.length === 0) {
       break;
     }
-
-    if (totalCount > 0 && repos.length >= totalCount) {
+    
+    // Stop if we got all repos according to total_count
+    if (typeof totalCount === "number" && repos.length >= totalCount) {
       break;
     }
-
-    if (data.length < PER_PAGE) {
+    
+    // Stop if no new repos were added (we've seen all of them)
+    if (repos.length === prevCount) {
       break;
     }
-
+    prevCount = repos.length;
+    
     page += 1;
+  }
+
+  // For authenticated users, also fetch private repos the user has access to
+  if (accessToken) {
+    page = 1;
+    while (true) {
+      const url = new URL(`${normalizeBaseUrl(baseUrl)}/api/v1/user/repos`);
+      url.searchParams.set("limit", String(PER_PAGE));
+      url.searchParams.set("page", String(page));
+
+      const response = await fetch(url.toString(), {
+        headers: { Authorization: `token ${accessToken}` },
+      });
+
+      if (!response.ok) {
+        break; // Don't fail if this endpoint fails, we still have search results
+      }
+
+      const data = (await response.json()) as GiteaRepo[];
+      
+      if (!Array.isArray(data) || data.length === 0) {
+        break;
+      }
+
+      const beforeCount = repos.length;
+      for (const repo of data) {
+        if (!seenIds.has(repo.id)) {
+          seenIds.add(repo.id);
+          repos.push(repo);
+        }
+      }
+
+      // Stop if no new repos were added
+      if (repos.length === beforeCount) {
+        break;
+      }
+
+      page += 1;
+    }
+
+    // Fetch ALL organizations (not just ones user is member of)
+    try {
+      let orgPage = 1;
+      const allOrgs: Array<{ username?: string; name?: string }> = [];
+      
+      while (true) {
+        const orgsResponse = await fetch(
+          `${normalizeBaseUrl(baseUrl)}/api/v1/orgs?limit=${PER_PAGE}&page=${orgPage}`,
+          { headers: { Authorization: `token ${accessToken}` } }
+        );
+
+        if (!orgsResponse.ok) {
+          break;
+        }
+
+        const orgs = (await orgsResponse.json()) as Array<{ username?: string; name?: string }>;
+        
+        if (!Array.isArray(orgs) || orgs.length === 0) {
+          break;
+        }
+        
+        allOrgs.push(...orgs);
+        
+        if (orgs.length < PER_PAGE) {
+          break;
+        }
+        orgPage += 1;
+      }
+      
+      for (const org of allOrgs) {
+        const orgName = org.username || org.name;
+        if (!orgName) continue;
+
+        let repoPage = 1;
+        while (true) {
+          const url = new URL(`${normalizeBaseUrl(baseUrl)}/api/v1/orgs/${orgName}/repos`);
+          url.searchParams.set("limit", String(PER_PAGE));
+          url.searchParams.set("page", String(repoPage));
+
+          const response = await fetch(url.toString(), {
+            headers: { Authorization: `token ${accessToken}` },
+          });
+
+          if (!response.ok) {
+            break;
+          }
+
+          const data = (await response.json()) as GiteaRepo[];
+          if (!Array.isArray(data) || data.length === 0) {
+            break;
+          }
+
+          const beforeCount = repos.length;
+          for (const repo of data) {
+            if (!seenIds.has(repo.id)) {
+              seenIds.add(repo.id);
+              repos.push(repo);
+            }
+          }
+
+          // Stop if no new repos were added
+          if (repos.length === beforeCount) {
+            break;
+          }
+
+          repoPage += 1;
+        }
+      }
+    } catch {
+      // Ignore org fetch errors, we still have other repos
+    }
   }
 
   return repos;
@@ -521,7 +635,7 @@ export default function Command() {
   const handleRecordUsage = useCallback(
     async (repoId: number) => {
       const key = String(repoId);
-      const next = { ...usage, [key]: (usage[key] ?? 0) + 1 };
+      const next = { ...usage, [key]: Date.now() };
       setUsage(next);
       await saveUsage(next);
     },
@@ -536,7 +650,7 @@ export default function Command() {
     loadUsage().then(setUsage);
   }, []);
 
-  const filteredRepos = useMemo(() => {
+  const { recentRepos, otherRepos } = useMemo(() => {
     const query = searchText.trim().toLowerCase();
     const filtered = query
       ? repos.filter((repo) => {
@@ -545,14 +659,21 @@ export default function Command() {
         })
       : repos;
 
-    return [...filtered].sort((a, b) => {
-      const aScore = usage[String(a.id)] ?? 0;
-      const bScore = usage[String(b.id)] ?? 0;
-      if (aScore !== bScore) {
-        return bScore - aScore;
-      }
-      return a.full_name.localeCompare(b.full_name);
-    });
+    // Get repos with usage timestamps, sorted by most recent
+    const reposWithUsage = filtered
+      .filter((repo) => usage[String(repo.id)])
+      .sort((a, b) => (usage[String(b.id)] ?? 0) - (usage[String(a.id)] ?? 0));
+
+    // Take top 4 recent repos
+    const recent = reposWithUsage.slice(0, 4);
+    const recentIds = new Set(recent.map((r) => r.id));
+
+    // All other repos sorted alphabetically
+    const others = filtered
+      .filter((repo) => !recentIds.has(repo.id))
+      .sort((a, b) => a.full_name.localeCompare(b.full_name));
+
+    return { recentRepos: recent, otherRepos: others };
   }, [repos, searchText, usage]);
 
   const hasValidBaseUrl = isValidBaseUrl(baseUrl);
@@ -578,6 +699,7 @@ export default function Command() {
       isLoading={isLoading}
       searchBarPlaceholder="Search Gitea repositories"
       onSearchTextChange={setSearchText}
+      filtering={false}
       throttle
     >
       {errorMessage ? (
@@ -599,69 +721,142 @@ export default function Command() {
           }
         />
       ) : null}
-      {filteredRepos.map((repo) => {
-        const repoUrl = buildRepoUrl(baseUrl, repo);
-        const iconSource = repo.owner?.avatar_url ? { source: repo.owner.avatar_url } : Icon.Code;
+      {recentRepos.length > 0 && (
+        <List.Section title="Recent" subtitle={`${recentRepos.length} repositories`}>
+          {recentRepos.map((repo) => {
+            const repoUrl = buildRepoUrl(baseUrl, repo);
+            const iconSource = repo.owner?.avatar_url ? { source: repo.owner.avatar_url } : Icon.Code;
 
-        return (
-          <List.Item
-            key={repo.id}
-            title={repo.full_name}
-            subtitle={repo.description ?? ""}
-            icon={iconSource}
-            actions={
-              <ActionPanel>
-                {quickOpen ? (
-                  <>
-                    <Action.Push
-                      title="Choose Section"
-                      icon={Icon.List}
-                      target={
-                        <RepoSections
-                          baseUrl={baseUrl}
-                          repo={repo}
-                          onOpen={handleRecordUsage}
-                          accessToken={accessToken}
+            return (
+              <List.Item
+                key={repo.id}
+                title={repo.full_name}
+                subtitle={repo.description ?? ""}
+                icon={iconSource}
+                actions={
+                  <ActionPanel>
+                    {quickOpen ? (
+                      <>
+                        <Action.Push
+                          title="Choose Section"
+                          icon={Icon.List}
+                          target={
+                            <RepoSections
+                              baseUrl={baseUrl}
+                              repo={repo}
+                              onOpen={handleRecordUsage}
+                              accessToken={accessToken}
+                            />
+                          }
+                          onPush={() => handleRecordUsage(repo.id)}
                         />
-                      }
-                    />
-                    <Action.OpenInBrowser
-                      title="Quick Open Repository"
-                      url={repoUrl}
-                      onOpen={() => handleRecordUsage(repo.id)}
-                    />
-                  </>
-                ) : (
-                  <>
-                    <Action.Push
-                      title="Choose Section"
-                      icon={Icon.List}
-                      target={
-                        <RepoSections
-                          baseUrl={baseUrl}
-                          repo={repo}
-                          onOpen={handleRecordUsage}
-                          accessToken={accessToken}
+                        <Action.OpenInBrowser
+                          title="Quick Open Repository"
+                          url={repoUrl}
+                          onOpen={() => handleRecordUsage(repo.id)}
                         />
-                      }
-                    />
-                    <Action.OpenInBrowser
-                      title="Open Repository in Browser"
-                      url={repoUrl}
-                      onOpen={() => handleRecordUsage(repo.id)}
-                    />
-                  </>
-                )}
-                <Action.CopyToClipboard title="Copy Repository URL" content={repoUrl} />
-                <Action title="Refresh Repositories" icon={Icon.ArrowClockwise} onAction={() => refreshRepos(true)} />
-                <Action title="Clear Cache" icon={Icon.Trash} onAction={handleClearCache} />
-                <Action title="Reset Usage Stats" icon={Icon.ArrowCounterClockwise} onAction={handleResetUsage} />
-                <Action.Push title="How to Open Preferences" icon={Icon.Gear} target={<PreferencesHelp />} />
-              </ActionPanel>
-            }
-          />
-        );
-      })}
+                      </>
+                    ) : (
+                      <>
+                        <Action.Push
+                          title="Choose Section"
+                          icon={Icon.List}
+                          target={
+                            <RepoSections
+                              baseUrl={baseUrl}
+                              repo={repo}
+                              onOpen={handleRecordUsage}
+                              accessToken={accessToken}
+                            />
+                          }
+                          onPush={() => handleRecordUsage(repo.id)}
+                        />
+                        <Action.OpenInBrowser
+                          title="Open Repository in Browser"
+                          url={repoUrl}
+                          onOpen={() => handleRecordUsage(repo.id)}
+                        />
+                      </>
+                    )}
+                    <Action.CopyToClipboard title="Copy Repository URL" content={repoUrl} />
+                    <Action title="Refresh Repositories" icon={Icon.ArrowClockwise} onAction={() => refreshRepos(true)} />
+                    <Action title="Clear Cache" icon={Icon.Trash} onAction={handleClearCache} />
+                    <Action title="Reset Usage Stats" icon={Icon.ArrowCounterClockwise} onAction={handleResetUsage} />
+                    <Action.Push title="How to Open Preferences" icon={Icon.Gear} target={<PreferencesHelp />} />
+                  </ActionPanel>
+                }
+              />
+            );
+          })}
+        </List.Section>
+      )}
+      <List.Section title="All Repositories" subtitle={`${otherRepos.length} repositories`}>
+        {otherRepos.map((repo) => {
+          const repoUrl = buildRepoUrl(baseUrl, repo);
+          const iconSource = repo.owner?.avatar_url ? { source: repo.owner.avatar_url } : Icon.Code;
+
+          return (
+            <List.Item
+              key={repo.id}
+              title={repo.full_name}
+              subtitle={repo.description ?? ""}
+              icon={iconSource}
+              actions={
+                <ActionPanel>
+                  {quickOpen ? (
+                    <>
+                      <Action.Push
+                        title="Choose Section"
+                        icon={Icon.List}
+                        target={
+                          <RepoSections
+                            baseUrl={baseUrl}
+                            repo={repo}
+                            onOpen={handleRecordUsage}
+                            accessToken={accessToken}
+                          />
+                        }
+                        onPush={() => handleRecordUsage(repo.id)}
+                      />
+                      <Action.OpenInBrowser
+                        title="Quick Open Repository"
+                        url={repoUrl}
+                        onOpen={() => handleRecordUsage(repo.id)}
+                      />
+                    </>
+                  ) : (
+                    <>
+                      <Action.Push
+                        title="Choose Section"
+                        icon={Icon.List}
+                        target={
+                          <RepoSections
+                            baseUrl={baseUrl}
+                            repo={repo}
+                            onOpen={handleRecordUsage}
+                            accessToken={accessToken}
+                          />
+                        }
+                        onPush={() => handleRecordUsage(repo.id)}
+                      />
+                      <Action.OpenInBrowser
+                        title="Open Repository in Browser"
+                        url={repoUrl}
+                        onOpen={() => handleRecordUsage(repo.id)}
+                      />
+                    </>
+                  )}
+                  <Action.CopyToClipboard title="Copy Repository URL" content={repoUrl} />
+                  <Action title="Refresh Repositories" icon={Icon.ArrowClockwise} onAction={() => refreshRepos(true)} />
+                  <Action title="Clear Cache" icon={Icon.Trash} onAction={handleClearCache} />
+                  <Action title="Reset Usage Stats" icon={Icon.ArrowCounterClockwise} onAction={handleResetUsage} />
+                  <Action.Push title="How to Open Preferences" icon={Icon.Gear} target={<PreferencesHelp />} />
+                </ActionPanel>
+              }
+            />
+          );
+        })}
+      </List.Section>
     </List>
   );
 }
