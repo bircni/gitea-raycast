@@ -84,16 +84,16 @@ export function formatUpdatedAt(updatedAt: string) {
 export function formatStatus(state?: string) {
   const normalized = (state ?? "").toLowerCase();
   if (normalized === "success") {
-    return "✅ checks passed";
+    return "✅ passed";
   }
   if (normalized === "failure") {
-    return "❌ checks failed";
+    return "❌ failed";
   }
   if (normalized === "pending") {
-    return "⏳ checks pending";
+    return "⏳ pending";
   }
   if (normalized === "error") {
-    return "⚠️ checks error";
+    return "⚠️ error";
   }
-  return "⚪ checks unknown";
+  return "⚪ unknown";
 }

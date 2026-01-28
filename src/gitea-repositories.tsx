@@ -22,29 +22,18 @@ import {
   type GiteaRelease,
   type GiteaRepo,
 } from "./lib/gitea";
-
-interface GiteaAuthenticatedUser {
-  id: number;
-  login: string;
-}
-
-async function fetchCurrentUser(baseUrl: string, accessToken: string): Promise<GiteaAuthenticatedUser | null> {
-  try {
-    const response = await fetch(`${normalizeBaseUrl(baseUrl)}/api/v1/user`, {
-      headers: { Authorization: `token ${accessToken}` },
-    });
-    if (!response.ok) {
-      return null;
-    }
-    const data = (await response.json()) as GiteaAuthenticatedUser;
-    return data;
-  } catch {
-    return null;
-  }
-}
+import {
+  fetchAllRepos,
+  fetchCommitStatus,
+  fetchCurrentUser,
+  fetchPaged,
+  type GiteaAuthenticatedUser,
+} from "./lib/gitea-api";
+import { GiteaSetupForm } from "./lib/GiteaSetupForm";
+import { loadStoredGiteaSettings } from "./lib/gitea-settings";
 
 interface Preferences {
-  baseUrl: string;
+  baseUrl?: string;
   accessToken?: string;
   cacheTtlMinutes?: string;
   quickOpen?: boolean;
@@ -53,7 +42,6 @@ const CACHE_KEY = "gitea-repos-cache";
 const CACHE_TIME_KEY = "gitea-repos-cache-time";
 const USAGE_KEY = "gitea-repos-usage";
 const DEFAULT_CACHE_TTL_MINUTES = 60;
-const PER_PAGE = 100;
 
 function RepoSections({
   baseUrl,
@@ -136,58 +124,6 @@ function PreferencesHelp() {
   ].join("\n");
 
   return <Detail markdown={markdown} />;
-}
-
-async function fetchPaged<T>(url: string, accessToken?: string) {
-  const items: T[] = [];
-  let page = 1;
-
-  while (true) {
-    const apiUrl = new URL(url);
-    apiUrl.searchParams.set("limit", String(PER_PAGE));
-    apiUrl.searchParams.set("page", String(page));
-    if (accessToken) {
-      apiUrl.searchParams.set("token", accessToken);
-    }
-
-    const response = await fetch(apiUrl.toString(), {
-      headers: accessToken ? { Authorization: `token ${accessToken}` } : undefined,
-    });
-
-    if (!response.ok) {
-      const message = await response.text();
-      throw new Error(`Gitea API error (${response.status}): ${message || response.statusText}`);
-    }
-
-    const data = (await response.json()) as T[];
-    if (!Array.isArray(data) || data.length === 0) {
-      break;
-    }
-
-    items.push(...data);
-    if (data.length < PER_PAGE) {
-      break;
-    }
-
-    page += 1;
-  }
-
-  return items;
-}
-
-async function fetchCommitStatus(baseUrl: string, owner: string, name: string, sha: string, accessToken?: string) {
-  const statusUrl = `${normalizeBaseUrl(baseUrl)}/api/v1/repos/${owner}/${name}/commits/${sha}/status`;
-  const response = await fetch(statusUrl, {
-    headers: accessToken ? { Authorization: `token ${accessToken}` } : undefined,
-  });
-
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(`Gitea API error (${response.status}): ${message || response.statusText}`);
-  }
-
-  const payload = (await response.json()) as { state?: string };
-  return payload.state;
 }
 
 function IssuesList({ baseUrl, repo, accessToken }: { baseUrl: string; repo: GiteaRepo; accessToken?: string }) {
@@ -324,9 +260,7 @@ function PullRequestsList({ baseUrl, repo, accessToken }: { baseUrl: string; rep
       );
     }
     if (filter === "review_requested") {
-      return pulls.filter((pr) =>
-        pr.requested_reviewers?.some((reviewer) => reviewer.login === currentUser.login),
-      );
+      return pulls.filter((pr) => pr.requested_reviewers?.some((reviewer) => reviewer.login === currentUser.login));
     }
     return pulls;
   }, [pulls, filter, currentUser]);
@@ -396,7 +330,9 @@ function PullRequestsList({ baseUrl, repo, accessToken }: { baseUrl: string; rep
                       onAction={() => setFilter(filter === "created" ? "none" : "created")}
                     />
                     <Action
-                      title={filter === "review_requested" ? "Clear 'Review Requested' Filter" : "Show Review Requested"}
+                      title={
+                        filter === "review_requested" ? "Clear 'Review Requested' Filter" : "Show Review Requested"
+                      }
                       icon={filter === "review_requested" ? Icon.XMarkCircle : Icon.Eye}
                       shortcut={{ modifiers: ["cmd", "shift"], key: "r" }}
                       onAction={() => setFilter(filter === "review_requested" ? "none" : "review_requested")}
@@ -462,171 +398,6 @@ function ReleasesList({ baseUrl, repo, accessToken }: { baseUrl: string; repo: G
   );
 }
 
-async function fetchAllRepos(baseUrl: string, accessToken?: string) {
-  const repos: GiteaRepo[] = [];
-  const seenIds = new Set<number>();
-
-  // Always fetch all accessible repos via search endpoint
-  // This includes public repos and repos the user has access to
-  let page = 1;
-  let prevCount = 0;
-  while (true) {
-    const url = new URL(`${normalizeBaseUrl(baseUrl)}/api/v1/repos/search`);
-    url.searchParams.set("limit", String(PER_PAGE));
-    url.searchParams.set("page", String(page));
-
-    const response = await fetch(url.toString(), {
-      headers: accessToken ? { Authorization: `token ${accessToken}` } : undefined,
-    });
-
-    if (!response.ok) {
-      const message = await response.text();
-      throw new Error(`Gitea API error (${response.status}): ${message || response.statusText}`);
-    }
-
-    const json = (await response.json()) as { data?: GiteaRepo[]; total_count?: number };
-    const data: GiteaRepo[] = Array.isArray(json.data) ? json.data : [];
-    const totalCount = json.total_count;
-
-    for (const repo of data) {
-      if (!seenIds.has(repo.id)) {
-        seenIds.add(repo.id);
-        repos.push(repo);
-      }
-    }
-
-    // Stop if no data returned
-    if (data.length === 0) {
-      break;
-    }
-
-    // Stop if we got all repos according to total_count
-    if (typeof totalCount === "number" && repos.length >= totalCount) {
-      break;
-    }
-
-    // Stop if no new repos were added (we've seen all of them)
-    if (repos.length === prevCount) {
-      break;
-    }
-    prevCount = repos.length;
-
-    page += 1;
-  }
-
-  // For authenticated users, also fetch private repos the user has access to
-  if (accessToken) {
-    page = 1;
-    while (true) {
-      const url = new URL(`${normalizeBaseUrl(baseUrl)}/api/v1/user/repos`);
-      url.searchParams.set("limit", String(PER_PAGE));
-      url.searchParams.set("page", String(page));
-
-      const response = await fetch(url.toString(), {
-        headers: { Authorization: `token ${accessToken}` },
-      });
-
-      if (!response.ok) {
-        break; // Don't fail if this endpoint fails, we still have search results
-      }
-
-      const data = (await response.json()) as GiteaRepo[];
-
-      if (!Array.isArray(data) || data.length === 0) {
-        break;
-      }
-
-      const beforeCount = repos.length;
-      for (const repo of data) {
-        if (!seenIds.has(repo.id)) {
-          seenIds.add(repo.id);
-          repos.push(repo);
-        }
-      }
-
-      // Stop if no new repos were added
-      if (repos.length === beforeCount) {
-        break;
-      }
-
-      page += 1;
-    }
-
-    // Fetch ALL organizations (not just ones user is member of)
-    try {
-      let orgPage = 1;
-      const allOrgs: Array<{ username?: string; name?: string }> = [];
-
-      while (true) {
-        const orgsResponse = await fetch(`${normalizeBaseUrl(baseUrl)}/api/v1/orgs?limit=${PER_PAGE}&page=${orgPage}`, {
-          headers: { Authorization: `token ${accessToken}` },
-        });
-
-        if (!orgsResponse.ok) {
-          break;
-        }
-
-        const orgs = (await orgsResponse.json()) as Array<{ username?: string; name?: string }>;
-
-        if (!Array.isArray(orgs) || orgs.length === 0) {
-          break;
-        }
-
-        allOrgs.push(...orgs);
-
-        if (orgs.length < PER_PAGE) {
-          break;
-        }
-        orgPage += 1;
-      }
-
-      for (const org of allOrgs) {
-        const orgName = org.username || org.name;
-        if (!orgName) continue;
-
-        let repoPage = 1;
-        while (true) {
-          const url = new URL(`${normalizeBaseUrl(baseUrl)}/api/v1/orgs/${orgName}/repos`);
-          url.searchParams.set("limit", String(PER_PAGE));
-          url.searchParams.set("page", String(repoPage));
-
-          const response = await fetch(url.toString(), {
-            headers: { Authorization: `token ${accessToken}` },
-          });
-
-          if (!response.ok) {
-            break;
-          }
-
-          const data = (await response.json()) as GiteaRepo[];
-          if (!Array.isArray(data) || data.length === 0) {
-            break;
-          }
-
-          const beforeCount = repos.length;
-          for (const repo of data) {
-            if (!seenIds.has(repo.id)) {
-              seenIds.add(repo.id);
-              repos.push(repo);
-            }
-          }
-
-          // Stop if no new repos were added
-          if (repos.length === beforeCount) {
-            break;
-          }
-
-          repoPage += 1;
-        }
-      }
-    } catch {
-      // Ignore org fetch errors, we still have other repos
-    }
-  }
-
-  return repos;
-}
-
 async function loadCachedRepos() {
   const [rawRepos, rawTime] = await Promise.all([
     LocalStorage.getItem<string>(CACHE_KEY),
@@ -679,16 +450,37 @@ async function saveUsage(usage: Record<string, number>) {
 
 export default function Command() {
   const preferences = getPreferenceValues<Preferences>();
-  const baseUrl = preferences.baseUrl?.trim();
-  const accessToken = preferences.accessToken?.trim();
+  const prefBaseUrl = preferences.baseUrl?.trim();
+  const prefAccessToken = preferences.accessToken?.trim();
   const cacheTtlMinutes = Number(preferences.cacheTtlMinutes) || DEFAULT_CACHE_TTL_MINUTES;
   const quickOpen = preferences.quickOpen ?? false;
+
+  const [baseUrl, setBaseUrl] = useState<string | undefined>(prefBaseUrl);
+  const [accessToken, setAccessToken] = useState<string | undefined>(prefAccessToken);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
 
   const [repos, setRepos] = useState<GiteaRepo[]>([]);
   const [usage, setUsage] = useState<Record<string, number>>({});
   const [isLoading, setIsLoading] = useState(true);
   const [searchText, setSearchText] = useState("");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+    loadStoredGiteaSettings()
+      .then((stored) => {
+        if (!isMounted) return;
+        setBaseUrl((current) => current || stored.baseUrl);
+        setAccessToken((current) => current || stored.accessToken);
+      })
+      .finally(() => {
+        if (!isMounted) return;
+        setSettingsLoaded(true);
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   const refreshRepos = useCallback(
     async (force = false) => {
@@ -750,8 +542,9 @@ export default function Command() {
   );
 
   useEffect(() => {
+    if (!settingsLoaded) return;
     refreshRepos();
-  }, [refreshRepos]);
+  }, [refreshRepos, settingsLoaded]);
 
   useEffect(() => {
     loadUsage().then(setUsage);
@@ -784,20 +577,19 @@ export default function Command() {
   }, [repos, searchText, usage]);
 
   const hasValidBaseUrl = isValidBaseUrl(baseUrl);
+  if (!settingsLoaded) {
+    return <List isLoading />;
+  }
+
   if (!hasValidBaseUrl) {
     return (
-      <List>
-        <List.Item
-          icon={Icon.Gear}
-          title="Set up your Gitea instance"
-          subtitle="Open preferences to update the base URL"
-          actions={
-            <ActionPanel>
-              <Action.Push title="How to Open Preferences" icon={Icon.Gear} target={<PreferencesHelp />} />
-            </ActionPanel>
-          }
-        />
-      </List>
+      <GiteaSetupForm
+        requireToken={false}
+        onSaved={(next) => {
+          setBaseUrl(next.baseUrl);
+          setAccessToken(next.accessToken);
+        }}
+      />
     );
   }
 

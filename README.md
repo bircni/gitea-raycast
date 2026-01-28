@@ -44,6 +44,7 @@ Open Raycast → **Extensions** → **Gitea** → **Preferences** and set:
 Run the command:
 
 - **Gitea Repositories**
+- **Gitea Pull Requests** (shows open PRs you created and open PRs where review is requested)
 
 From a repository:
 
@@ -56,6 +57,7 @@ From a repository:
 
 - **Invalid URL**: ensure the base URL includes protocol, e.g. `http://` or `https://`.
 - **No private repos**: add a personal access token in preferences.
+- **PR inbox empty / errors**: ensure your access token can read pull requests (and that your Gitea version supports the required endpoints; the extension will fall back to scanning repos if needed).
 - **Missing data**: use “Refresh Repositories” or increase cache TTL.
 
 ## Development

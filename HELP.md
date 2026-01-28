@@ -12,6 +12,7 @@
 ## Commands
 
 - **Gitea Repositories**: Search repos and open sections.
+- **Gitea Pull Requests**: Shows open pull requests you created and open pull requests where review is requested.
 
 ## Tips
 

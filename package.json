@@ -5,6 +5,41 @@
   "description": "Connects your Gitea instance to Raycast",
   "icon": "extension-icon.png",
   "license": "MIT",
+  "preferences": [
+    {
+      "name": "baseUrl",
+      "title": "Gitea Base URL",
+      "type": "textfield",
+      "description": "Base URL of your Gitea instance",
+      "required": false,
+      "placeholder": "https://gitea.example.com"
+    },
+    {
+      "name": "accessToken",
+      "title": "Access Token",
+      "type": "password",
+      "description": "Optional personal access token for private repositories",
+      "required": false,
+      "placeholder": "Optional personal access token"
+    },
+    {
+      "name": "cacheTtlMinutes",
+      "title": "Cache TTL (minutes)",
+      "type": "textfield",
+      "description": "How long to cache API results (repositories and pull request inbox)",
+      "required": false,
+      "default": "60"
+    },
+    {
+      "name": "debug",
+      "title": "Debug Logging",
+      "type": "checkbox",
+      "label": "Enable debug logs for Gitea API calls",
+      "description": "Adds a “Show Debug Info” action and logs request details for troubleshooting",
+      "required": false,
+      "default": true
+    }
+  ],
   "commands": [
     {
       "name": "gitea-repositories",
@@ -13,30 +48,6 @@
       "mode": "view",
       "subtitle": "Search and open Gitea repositories",
       "preferences": [
-        {
-          "name": "baseUrl",
-          "title": "Gitea Base URL",
-          "type": "textfield",
-          "description": "Base URL of your Gitea instance",
-          "required": true,
-          "placeholder": "https://gitea.example.com"
-        },
-        {
-          "name": "accessToken",
-          "title": "Access Token",
-          "type": "password",
-          "description": "Optional personal access token for private repositories",
-          "required": true,
-          "placeholder": "Optional personal access token"
-        },
-        {
-          "name": "cacheTtlMinutes",
-          "title": "Cache TTL (minutes)",
-          "type": "textfield",
-          "description": "How long to cache repository results",
-          "required": false,
-          "default": "60"
-        },
         {
           "name": "quickOpen",
           "title": "Quick Open Repository",
@@ -47,6 +58,13 @@
           "default": false
         }
       ]
+    },
+    {
+      "name": "gitea-pull-requests",
+      "title": "Gitea Pull Requests",
+      "description": "Shows open pull requests you created or are requested to review",
+      "mode": "view",
+      "subtitle": "Open pull request inbox"
     }
   ],
   "dependencies": {
