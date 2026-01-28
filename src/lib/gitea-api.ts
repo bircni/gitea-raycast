@@ -94,7 +94,11 @@ export async function fetchAllRepos(baseUrl: string, accessToken?: string) {
 
     if (!response.ok) {
       const message = await response.text();
-      throw new Error(`Gitea API error (${response.status}): ${message || response.statusText}`);
+      throw new GiteaApiError(
+        response.status,
+        `Gitea API error (${response.status}): ${message || response.statusText}`,
+        url.toString(),
+      );
     }
 
     const json = (await response.json()) as { data?: GiteaRepo[]; total_count?: number };

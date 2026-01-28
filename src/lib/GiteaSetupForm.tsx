@@ -1,6 +1,16 @@
-import { Action, ActionPanel, Detail, Form, Icon } from "@raycast/api";
+import { Action, ActionPanel, Detail, Form, Icon, showToast, Toast } from "@raycast/api";
 import { useEffect, useState } from "react";
 import { clearStoredGiteaSettings, loadStoredGiteaSettings, saveStoredGiteaSettings } from "./gitea-settings";
+
+function isValidUrl(urlString: string): boolean {
+  if (!urlString) return false;
+  try {
+    const url = new URL(urlString);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
 
 export function GiteaSetupForm({
   requireToken,
@@ -14,6 +24,8 @@ export function GiteaSetupForm({
   const [baseUrl, setBaseUrl] = useState("");
   const [accessToken, setAccessToken] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [baseUrlError, setBaseUrlError] = useState<string | undefined>();
+  const [tokenError, setTokenError] = useState<string | undefined>();
 
   useEffect(() => {
     loadStoredGiteaSettings()
@@ -23,6 +35,29 @@ export function GiteaSetupForm({
       })
       .finally(() => setIsLoading(false));
   }, []);
+
+  const validateBaseUrl = (value: string) => {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      setBaseUrlError("Base URL is required");
+      return false;
+    }
+    if (!isValidUrl(trimmed)) {
+      setBaseUrlError("Must be a valid URL (e.g., https://gitea.example.com)");
+      return false;
+    }
+    setBaseUrlError(undefined);
+    return true;
+  };
+
+  const validateToken = (value: string) => {
+    if (requireToken && !value.trim()) {
+      setTokenError("Access token is required for this command");
+      return false;
+    }
+    setTokenError(undefined);
+    return true;
+  };
 
   return (
     <Form
@@ -36,6 +71,15 @@ export function GiteaSetupForm({
             onSubmit={async () => {
               const cleanedBaseUrl = baseUrl.trim();
               const cleanedToken = accessToken.trim();
+
+              const urlValid = validateBaseUrl(cleanedBaseUrl);
+              const tokenValid = validateToken(cleanedToken);
+
+              if (!urlValid || !tokenValid) {
+                await showToast({ style: Toast.Style.Failure, title: "Please fix the errors above" });
+                return;
+              }
+
               await saveStoredGiteaSettings({ baseUrl: cleanedBaseUrl, accessToken: cleanedToken });
               onSaved({ baseUrl: cleanedBaseUrl, accessToken: cleanedToken || undefined });
             }}
@@ -48,6 +92,8 @@ export function GiteaSetupForm({
                 await clearStoredGiteaSettings();
                 setBaseUrl("");
                 setAccessToken("");
+                setBaseUrlError(undefined);
+                setTokenError(undefined);
               }}
             />
             {onCancel ? <Action title="Cancel" icon={Icon.XMarkCircle} onAction={onCancel} /> : null}
@@ -77,14 +123,32 @@ export function GiteaSetupForm({
         title="Gitea Base URL"
         placeholder="https://gitea.example.com"
         value={baseUrl}
-        onChange={setBaseUrl}
+        error={baseUrlError}
+        onChange={(value) => {
+          setBaseUrl(value);
+          if (baseUrlError) validateBaseUrl(value);
+        }}
+        onBlur={(e) => {
+          const target = e.target as HTMLInputElement | null;
+          if (target?.value) validateBaseUrl(target.value);
+        }}
       />
       <Form.PasswordField
         id="accessToken"
         title="Access Token"
         placeholder={requireToken ? "Required for this command" : "Optional (for private repositories)"}
         value={accessToken}
-        onChange={setAccessToken}
+        error={tokenError}
+        onChange={(value) => {
+          setAccessToken(value);
+          if (tokenError) validateToken(value);
+        }}
+        onBlur={(e) => {
+          if (requireToken) {
+            const target = e.target as HTMLInputElement | null;
+            validateToken(target?.value ?? "");
+          }
+        }}
       />
     </Form>
   );
