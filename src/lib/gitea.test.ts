@@ -32,10 +32,10 @@ describe("gitea helpers", () => {
   });
 
   it("formats check statuses", () => {
-    expect(formatStatus("success")).toBe("✅ checks passed");
-    expect(formatStatus("failure")).toBe("❌ checks failed");
-    expect(formatStatus("pending")).toBe("⏳ checks pending");
-    expect(formatStatus("error")).toBe("⚠️ checks error");
-    expect(formatStatus("unknown")).toBe("⚪ checks unknown");
+    expect(formatStatus("success")).toBe("✅ passed");
+    expect(formatStatus("failure")).toBe("❌ failed");
+    expect(formatStatus("pending")).toBe("⏳ pending");
+    expect(formatStatus("error")).toBe("⚠️ error");
+    expect(formatStatus("unknown")).toBe("⚪ unknown");
   });
 });
